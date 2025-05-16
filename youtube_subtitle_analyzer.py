@@ -37,7 +37,7 @@ async def analyze_youtube_subtitle(
     3. 영상에서 언급된 주요 기술이나 지식에 대한 추가적인 설명과 보충 정보를 제공합니다.
     4. 공식적이고 검증된 정보만을 사용하여 정확하고 신뢰할 수 있는 분석 결과를 제공합니다.
     5. 해당 추출된 자막을 기반으로 학습 자료를 아티팩트 형식으로 만듭니다.
-    6. 아티팩트 형식은 다이어그램 인포그래픽 형식으로 만듭니다.
+    6. 아티팩트 형식은 다이어그램 인포그래픽 형식으로 추출합니다
 
     주의사항:
     - 영상 길이가 매우 길 경우 자막 처리에 시간이 걸릴 수 있습니다.
@@ -159,29 +159,44 @@ async def analyze_youtube_subtitle(
                 transcript_data = found_transcript.fetch()
                 
                 # 자막 텍스트 결합 (시간 순서대로)
+                # 자막 텍스트 추출 (객체 타입에 따라 다르게 처리)
                 if isinstance(transcript_data, list):
-                    subtitle_lines = [entry.get('text', '') for entry in transcript_data if isinstance(entry, dict)]
+                    # 기존 리스트 형식 처리 (get_transcript 반환 형식)
+                    subtitle_lines = [entry.get('text', '') if isinstance(entry, dict) and 'text' in entry else str(entry) for entry in transcript_data]
                     subtitle_text = " ".join(subtitle_lines)
                 else:
-                    print(f"예상치 못한 자막 데이터 형식: {type(transcript_data)}")
-                    # 직접 문자열 추출 시도
                     try:
-                        # found_transcript의 fetch 메서드 사용
-                        transcript_data = found_transcript.fetch()
-                        subtitle_text = " ".join([entry.get('text', '') for entry in transcript_data])
+                        # fetch() 메서드가 반환하는 FetchedTranscript 객체 처리
+                        # snippets 속성이 있는지 확인하고 각 snippet에서 text 추출
+                        if hasattr(transcript_data, 'snippets'):
+                            subtitle_lines = [snippet.text for snippet in transcript_data.snippets]
+                            subtitle_text = " ".join(subtitle_lines)
+                        else:
+                            # 기타 형식은 문자열로 변환
+                            print(f"예상치 못한 자막 데이터 형식: {type(transcript_data)}")
+                            subtitle_text = str(transcript_data)
                     except Exception as e:
-                        print(f"직접 자막 추출 시도 중 오류: {str(e)}")
-                        subtitle_text = f"자막 형식을 처리할 수 없습니다: {str(e)}"
-                        subtitle_type = "error"
+                        print(f"자막 데이터 처리 중 오류: {str(e)}")
+                        subtitle_text = str(transcript_data)
             except Exception as e:
                 print(f"자막 데이터 처리 중 오류: {str(e)}")
                 # 직접적인 방법으로 다시 시도
                 try:
                     print("직접 자막 추출 시도 중...")
-                    # 새로운 Transcript 객체 생성 및 fetch 사용
-                    transcript = transcript_list.find_transcript([language])
-                    transcript_data = transcript.fetch()
-                    subtitle_text = " ".join([entry.get('text', '') for entry in transcript_data])
+                    # transcript 객체를 찾고 fetch 메서드 사용
+                    new_transcript = transcript_list.find_transcript([language])
+                    transcript_lines = new_transcript.fetch()
+                    # fetch 메서드의 반환 형식에 맞게 처리
+                    if isinstance(transcript_lines, list):
+                        subtitle_lines = [entry.get('text', '') if isinstance(entry, dict) and 'text' in entry else str(entry) for entry in transcript_lines]
+                        subtitle_text = " ".join(subtitle_lines)
+                    else:
+                        # FetchedTranscript 객체 처리
+                        if hasattr(transcript_lines, 'snippets'):
+                            subtitle_lines = [snippet.text for snippet in transcript_lines.snippets]
+                            subtitle_text = " ".join(subtitle_lines)
+                        else:
+                            subtitle_text = str(transcript_lines)
                     print(f"직접 추출 성공, 길이: {len(subtitle_text)} 자")
                 except Exception as e2:
                     print(f"직접 추출 실패: {str(e2)}")
