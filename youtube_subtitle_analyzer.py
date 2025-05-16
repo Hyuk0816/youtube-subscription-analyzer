@@ -166,9 +166,9 @@ async def analyze_youtube_subtitle(
                     print(f"예상치 못한 자막 데이터 형식: {type(transcript_data)}")
                     # 직접 문자열 추출 시도
                     try:
-                        # YouTubeTranscriptApi의 직접 메서드 사용
-                        transcript_lines = YouTubeTranscriptApi.get_transcript(video_id, languages=[found_transcript.language_code])
-                        subtitle_text = " ".join([entry.get('text', '') for entry in transcript_lines])
+                        # found_transcript의 fetch 메서드 사용
+                        transcript_data = found_transcript.fetch()
+                        subtitle_text = " ".join([entry.get('text', '') for entry in transcript_data])
                     except Exception as e:
                         print(f"직접 자막 추출 시도 중 오류: {str(e)}")
                         subtitle_text = f"자막 형식을 처리할 수 없습니다: {str(e)}"
@@ -178,8 +178,10 @@ async def analyze_youtube_subtitle(
                 # 직접적인 방법으로 다시 시도
                 try:
                     print("직접 자막 추출 시도 중...")
-                    transcript_lines = YouTubeTranscriptApi.get_transcript(video_id, languages=[language])
-                    subtitle_text = " ".join([entry.get('text', '') for entry in transcript_lines])
+                    # 새로운 Transcript 객체 생성 및 fetch 사용
+                    transcript = transcript_list.find_transcript([language])
+                    transcript_data = transcript.fetch()
+                    subtitle_text = " ".join([entry.get('text', '') for entry in transcript_data])
                     print(f"직접 추출 성공, 길이: {len(subtitle_text)} 자")
                 except Exception as e2:
                     print(f"직접 추출 실패: {str(e2)}")
