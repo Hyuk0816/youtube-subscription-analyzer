@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # youtube_subtitle_analyzer.py
 
-import os
-import tempfile
-import json
+import re
 from typing import Optional, Dict, Any
-import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from mcp.server.fastmcp import FastMCP
 
 # FastMCP 서버 초기화
@@ -38,6 +36,8 @@ async def analyze_youtube_subtitle(
     2. 추출된 자막을 분석하여 핵심 내용을 요약합니다.
     3. 영상에서 언급된 주요 기술이나 지식에 대한 추가적인 설명과 보충 정보를 제공합니다.
     4. 공식적이고 검증된 정보만을 사용하여 정확하고 신뢰할 수 있는 분석 결과를 제공합니다.
+    5. 해당 추출된 자막을 기반으로 학습 자료를 아티팩트 형식으로 만듭니다.
+    6. 아티팩트 형식은 다이어그램 인포그래픽 형식으로 만듭니다.
 
     주의사항:
     - 영상 길이가 매우 길 경우 자막 처리에 시간이 걸릴 수 있습니다.
@@ -51,203 +51,177 @@ async def analyze_youtube_subtitle(
 
     Returns:
         Dict[str, Any]: 다음 키를 포함하는 사전을 반환합니다:
-            - video_title (str): 영상의 제목
+            - video_title (str): 영상의 제목 (가능한 경우)
             - subtitle_text (str): 추출된 자막 내용
             - subtitle_type (str): 자막 유형 (uploaded: 게시자 등록, auto: 자동 생성)
             - video_id (str): 유튜브 영상 ID
             - video_url (str): 원본 유튜브 URL
     """
-    # 자막 추출 함수
-    def extract_subtitles(youtube_url: str, language: str = "ko") -> tuple:
-        """유튜브 영상에서 자막을 추출합니다."""
-        ydl_opts = {
-            'skip_download': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': [language],
-            'subtitlesformat': 'json3',
-            'quiet': False,  # 디버깅을 위해 출력을 활성화
-            'verbose': True,  # 상세 로그 활성화
-            'no_warnings': False,  # 경고 메시지도 표시
-            'no_progress': False,
-            'noprogress': False,
-            'logger': None,
-            'listsubtitles': True,  # 사용 가능한 모든 자막 목록 확인
+    # 도우미 함수: YouTube URL에서 video_id 추출
+    def extract_video_id(url: str) -> str:
+        """YouTube URL에서 video_id를 추출합니다."""
+        pattern = r'(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
+        match = re.search(pattern, url)
+        return match.group(1) if match else ""
+
+    # 도우미 함수: 언어 코드 확장
+    def expand_language_code(language: str) -> list:
+        """언어 코드를 여러 가능한 변형으로 확장합니다."""
+        language_variants = [language]
+        
+        # 언어별 확장 코드 추가
+        if language == "ko":
+            language_variants.extend(["ko-KR", "ko_KR", "kor"])
+        elif language == "en":
+            language_variants.extend(["en-US", "en-GB", "en_US", "en_GB", "eng"])
+        elif language == "ja":
+            language_variants.extend(["ja-JP", "ja_JP", "jpn"])
+        elif language == "zh":
+            language_variants.extend(["zh-CN", "zh-TW", "zh_CN", "zh_TW", "chi", "zho"])
+            
+        return language_variants
+
+    try:
+        # 1. YouTube URL에서 비디오 ID 추출
+        video_id = extract_video_id(youtube_url)
+        if not video_id:
+            return {
+                "video_title": "알 수 없음",
+                "subtitle_text": "유효한 YouTube URL이 아닙니다.",
+                "subtitle_type": "error",
+                "video_id": "",
+                "video_url": youtube_url
+            }
+        
+        # 2. 확장된 언어 코드 가져오기
+        language_variants = expand_language_code(language)
+        
+        # 3. 자막 목록 가져오기
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        # 변수 초기화
+        found_transcript = None
+        subtitle_type = "none"
+        video_title = "제목 없음"  # 이 라이브러리는 비디오 제목을 가져오지 않음
+        
+        # 4. 선호하는 언어의 자막 찾기 (업로드된 자막 우선)
+        try:
+            # 업로드된 자막 먼저 시도
+            for lang in language_variants:
+                try:
+                    transcript = transcript_list.find_transcript([lang])
+                    if not transcript.is_generated:
+                        found_transcript = transcript
+                        subtitle_type = "uploaded"
+                        print(f"업로드된 자막 찾음: {lang}")
+                        break
+                except:
+                    continue
+            
+            # 업로드된 자막이 없으면 자동 생성 자막 시도
+            if not found_transcript:
+                for lang in language_variants:
+                    try:
+                        transcript = transcript_list.find_transcript([lang])
+                        if transcript.is_generated:
+                            found_transcript = transcript
+                            subtitle_type = "auto"
+                            print(f"자동 생성 자막 찾음: {lang}")
+                            break
+                    except:
+                        continue
+            
+            # 원하는 언어의 자막을 찾지 못한 경우, 자동 번역 시도
+            if not found_transcript and language != "en":
+                try:
+                    # 영어 자막을 가져와서 지정한 언어로 번역
+                    transcript = transcript_list.find_transcript(['en'])
+                    found_transcript = transcript.translate(language)
+                    subtitle_type = "translated"
+                    print(f"영어 자막을 {language}로 번역")
+                except:
+                    # 영어 자막도 없거나 번역 실패한 경우, 첫 번째 가능한 자막 사용
+                    try:
+                        first_transcript = list(transcript_list)[0]
+                        found_transcript = first_transcript
+                        subtitle_type = "auto" if first_transcript.is_generated else "uploaded"
+                        print(f"대체 자막 사용: {first_transcript.language_code}")
+                    except:
+                        pass
+            
+        except Exception as e:
+            print(f"자막 검색 중 오류: {str(e)}")
+            
+        # 5. 자막 추출
+        if found_transcript:
+            try:
+                # 자막 데이터 가져오기
+                transcript_data = found_transcript.fetch()
+                
+                # 자막 텍스트 결합 (시간 순서대로)
+                if isinstance(transcript_data, list):
+                    subtitle_lines = [entry.get('text', '') for entry in transcript_data if isinstance(entry, dict)]
+                    subtitle_text = " ".join(subtitle_lines)
+                else:
+                    print(f"예상치 못한 자막 데이터 형식: {type(transcript_data)}")
+                    # 직접 문자열 추출 시도
+                    try:
+                        # YouTubeTranscriptApi의 직접 메서드 사용
+                        transcript_lines = YouTubeTranscriptApi.get_transcript(video_id, languages=[found_transcript.language_code])
+                        subtitle_text = " ".join([entry.get('text', '') for entry in transcript_lines])
+                    except Exception as e:
+                        print(f"직접 자막 추출 시도 중 오류: {str(e)}")
+                        subtitle_text = f"자막 형식을 처리할 수 없습니다: {str(e)}"
+                        subtitle_type = "error"
+            except Exception as e:
+                print(f"자막 데이터 처리 중 오류: {str(e)}")
+                # 직접적인 방법으로 다시 시도
+                try:
+                    print("직접 자막 추출 시도 중...")
+                    transcript_lines = YouTubeTranscriptApi.get_transcript(video_id, languages=[language])
+                    subtitle_text = " ".join([entry.get('text', '') for entry in transcript_lines])
+                    print(f"직접 추출 성공, 길이: {len(subtitle_text)} 자")
+                except Exception as e2:
+                    print(f"직접 추출 실패: {str(e2)}")
+                    subtitle_text = f"자막 추출 중 오류 발생: {str(e)}, 직접 시도: {str(e2)}"
+                    subtitle_type = "error"
+        else:
+            subtitle_text = f"이 영상에는 지정한 언어({language})의 자막이 없습니다."
+            subtitle_type = "none"
+            
+        # 6. 결과 반환
+        return {
+            "video_title": video_title,
+            "subtitle_text": subtitle_text,
+            "subtitle_type": subtitle_type,
+            "video_id": video_id,
+            "video_url": youtube_url
         }
         
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # 비디오 정보 가져오기
-                info = ydl.extract_info(youtube_url, download=False)
-                video_title = info.get('title', '제목 없음')
-                video_id = info.get('id', '')
-                
-                # 자막 정보 확인
-                subtitles = info.get('subtitles', {})
-                automatic_captions = info.get('automatic_captions', {})
-                
-                # 디버깅을 위해 사용 가능한 자막 정보 출력
-                print(f"사용 가능한 자막: {subtitles.keys()}")
-                print(f"사용 가능한 자동 생성 자막: {automatic_captions.keys()}")
-                
-                subtitle_type = "none"
-                subtitle_text = ""
-                
-                # 게시자가 업로드한 자막이 있는지 확인
-                if language in subtitles:
-                    subtitle_type = "uploaded"
-                    # 일시적인 디렉토리 생성
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        subtitle_opts = dict(ydl_opts)
-                        subtitle_opts['outtmpl'] = f'{temp_dir}/%(id)s.%(ext)s'
-                        with yt_dlp.YoutubeDL(subtitle_opts) as ydl_sub:
-                            ydl_sub.download([youtube_url])
-                        
-                        # 자막 파일 찾기
-                        files = os.listdir(temp_dir)
-                        subtitle_files = [f for f in files if f.endswith(f'.{language}.json3')]
-                        
-                        if subtitle_files:
-                            # 자막 파일 내용 읽기
-                            subtitle_path = os.path.join(temp_dir, subtitle_files[0])
-                            with open(subtitle_path, 'r', encoding='utf-8') as f:
-                                subtitle_content = f.read()
-                            
-                            # JSON3 형식이면 텍스트 추출
-                            try:
-                                # 로그 출력이 있을 경우 JSON 시작점 찾기
-                                json_content = subtitle_content
-                                if not subtitle_content.strip().startswith('{'):
-                                    # JSON 시작 위치 찾기
-                                    json_start = subtitle_content.find('{')
-                                    if json_start >= 0:
-                                        json_content = subtitle_content[json_start:]
-                                
-                                subtitle_json = json.loads(json_content)
-                                for event in subtitle_json.get('events', []):
-                                    if 'segs' in event:
-                                        for seg in event['segs']:
-                                            if 'utf8' in seg:
-                                                subtitle_text += seg['utf8'] + " "
-                            except json.JSONDecodeError as e:
-                                subtitle_text = f"자막 파일을 파싱할 수 없습니다: {str(e)}"
-                
-                # 자동 생성된 자막 확인 (게시자 업로드 자막이 없는 경우)
-                if subtitle_type == "none" and language in automatic_captions:
-                    subtitle_type = "auto"
-                    
-                    # 자동 자막의 모든 형식 목록 확인
-                    auto_formats = automatic_captions.get(language, [])
-                    print(f"자동 생성 자막 형식: {auto_formats}")
-                    
-                    # 지원되는 형식 찾기 (json3, vtt, srt 등)
-                    auto_format = None
-                    for fmt in auto_formats:
-                        if fmt.get('ext') == 'json3':
-                            auto_format = fmt
-                            break
-                    
-                    if auto_format:
-                        auto_url = auto_format.get('url')
-                        print(f"자동 생성 자막 URL: {auto_url}")
-                        
-                        # URL에서 직접 내용 다운로드 시도
-                        import requests
-                        try:
-                            response = requests.get(auto_url)
-                            if response.status_code == 200:
-                                caption_content = response.text
-                                print(f"자동 생성 자막 내용 처음 200자: {caption_content[:200]}")
-                                
-                                # JSON3 형식이면 텍스트 추출
-                                try:
-                                    # 로그 출력이 있을 경우 JSON 시작점 찾기
-                                    json_content = caption_content
-                                    if not caption_content.strip().startswith('{'):
-                                        # JSON 시작 위치 찾기
-                                        json_start = caption_content.find('{')
-                                        if json_start >= 0:
-                                            json_content = caption_content[json_start:]
-                                    
-                                    caption_json = json.loads(json_content)
-                                    for event in caption_json.get('events', []):
-                                        if 'segs' in event:
-                                            for seg in event['segs']:
-                                                if 'utf8' in seg:
-                                                    subtitle_text += seg['utf8'] + " "
-                                except json.JSONDecodeError as e:
-                                    subtitle_text = f"자막 파일을 파싱할 수 없습니다: {str(e)}"
-                            else:
-                                print(f"자막 URL 접근 실패: {response.status_code}")
-                        except Exception as e:
-                            print(f"자막 URL 처리 중 오류: {str(e)}")
-                    else:
-                        print("json3 형식의 자막을 찾을 수 없습니다.")
-                    
-                    # 기존 방식도 백업으로 유지
-                    if not subtitle_text:
-                        # 일시적인 디렉토리 생성
-                        with tempfile.TemporaryDirectory() as temp_dir:
-                            caption_opts = dict(ydl_opts)
-                            caption_opts['outtmpl'] = f'{temp_dir}/%(id)s.%(ext)s'
-                            with yt_dlp.YoutubeDL(caption_opts) as ydl_cap:
-                                ydl_cap.download([youtube_url])
-                            
-                            # 자막 파일 찾기
-                            files = os.listdir(temp_dir)
-                            print(f"다운로드된 파일 목록: {files}")
-                            caption_files = [f for f in files if f.endswith(f'.{language}.auto.json3')]
-                            
-                            if caption_files:
-                                # 자막 파일 내용 읽기
-                                caption_path = os.path.join(temp_dir, caption_files[0])
-                                with open(caption_path, 'r', encoding='utf-8') as f:
-                                    caption_content = f.read()
-                                
-                                print(f"파일에서 가져온 자막 내용 처음 200자: {caption_content[:200]}")
-                                
-                                # JSON3 형식이면 텍스트 추출
-                                try:
-                                    # 로그 출력이 있을 경우 JSON 시작점 찾기
-                                    json_content = caption_content
-                                    if not caption_content.strip().startswith('{'):
-                                        # JSON 시작 위치 찾기
-                                        json_start = caption_content.find('{')
-                                        if json_start >= 0:
-                                            json_content = caption_content[json_start:]
-                                    
-                                    caption_json = json.loads(json_content)
-                                    for event in caption_json.get('events', []):
-                                        if 'segs' in event:
-                                            for seg in event['segs']:
-                                                if 'utf8' in seg:
-                                                    subtitle_text += seg['utf8'] + " "
-                                except json.JSONDecodeError as e:
-                                    subtitle_text = f"자막 파일을 파싱할 수 없습니다: {str(e)}"
-                
-                # 자막이 없는 경우
-                if subtitle_type == "none":
-                    subtitle_text = "이 영상에는 지정한 언어의 자막이 없습니다."
-                
-                return video_title, subtitle_text, subtitle_type, video_id
-        
-        except Exception as e:
-            import traceback
-            error_detail = traceback.format_exc()
-            print(f"자막 추출 중 오류 발생: {str(e)}\n{error_detail}")
-            return "오류 발생", f"자막 추출 중 오류 발생: {str(e)}", "error", ""
-
-    # 유튜브 자막 추출 실행
-    video_title, subtitle_text, subtitle_type, video_id = extract_subtitles(youtube_url, language)
-    
-    # 결과 반환
-    return {
-        "video_title": video_title,
-        "subtitle_text": subtitle_text,
-        "subtitle_type": subtitle_type,
-        "video_id": video_id,
-        "video_url": youtube_url
-    }
+    except TranscriptsDisabled:
+        return {
+            "video_title": "알 수 없음",
+            "subtitle_text": "이 영상은 자막이 비활성화되어 있습니다.",
+            "subtitle_type": "error",
+            "video_id": video_id,
+            "video_url": youtube_url
+        }
+    except NoTranscriptFound:
+        return {
+            "video_title": "알 수 없음",
+            "subtitle_text": f"이 영상에는 지정한 언어({language})의 자막이 없습니다.",
+            "subtitle_type": "none",
+            "video_id": video_id,
+            "video_url": youtube_url
+        }
+    except Exception as e:
+        return {
+            "video_title": "알 수 없음",
+            "subtitle_text": f"자막 추출 중 오류 발생: {str(e)}",
+            "subtitle_type": "error",
+            "video_id": video_id if video_id else "알 수 없음",
+            "video_url": youtube_url
+        }
 
 
 if __name__ == "__main__":

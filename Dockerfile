@@ -7,7 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install yt-dlp
+RUN pip install youtube_transcript_api
 
 # 파이썬 스크립트 복사
 COPY youtube_subtitle_analyzer.py .
